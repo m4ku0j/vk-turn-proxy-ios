@@ -1,0 +1,30 @@
+workflows:
+  ios-build:
+    name: VKTurnProxy iOS Build
+    max_build_duration: 60
+    environment:
+      xcode: 16.2
+      
+    scripts:
+      - name: Download vkturn-client binary
+        script: |
+          mkdir -p VKTurnProxy/Resources
+          curl -L -o VKTurnProxy/Resources/vkturn-client \
+            https://github.com/cacggghp/vk-turn-proxy/releases/download/v1.1.1/client-android-arm64
+          chmod +x VKTurnProxy/Resources/vkturn-client
+
+      - name: Build unsigned IPA (sideload)
+        script: |
+          xcodebuild build \
+            -scheme VKTurnProxy \
+            -destination "generic/platform=iOS" \
+            -configuration Release \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ENABLE_BITCODE=NO \
+            | xcpretty
+
+    artifacts:
+      - build/**/*.ipa
+      - build/**/*.app
