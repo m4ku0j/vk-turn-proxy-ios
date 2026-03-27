@@ -1,102 +1,141 @@
 import Foundation
-import Combine
+import Network
+
+// MARK: - ProxyService
+//
+// ⚠️  iOS ОГРАНИЧЕНИЕ: Process() (NSTask) — macOS-only API.
+//     На iPhone запустить внешний бинарник через sandbox невозможно.
+//
+// РЕШЕНИЕ: Этот сервис управляет vk-turn-proxy через TCP-управляющий сокет
+//          к Linux-машине, где запущен vk-turn-proxy client.
+//
+//          Схема:
+//  iPhone (WireGuard) ──UDP──► Linux :9000 (vk-turn-proxy client)
+//                                    ──► VK TURN ──► VPS WireGuard
+//
+//  Этот класс (ProxyService) через Control API:
+//  - Запускает/останавливает vk-turn-proxy на Linux
+//  - Читает логи с Linux в реальном времени (TCP поток)
+//
+// АЛЬТЕРНАТИВА (если нет Linux под рукой):
+//  - iOS → прямой WireGuard к VPS 192.145.28.186:51820 (без TURN)
 
 class ProxyService: ObservableObject {
     @Published var isRunning = false
-    @Published var logs: [String] = ["Ожидание запуска..."]
+    @Published var logs: [String] = ["Ожидание запуска...\n⚠️ iOS не может запускать внешние процессы.\nИспользуй Linux как ретранслятор (см. README)."]
 
-    private var process: Process?
-    private var outputPipe: Pipe?
+    // Адрес Control-сервера на Linux (см. control-server.py)
+    var controlHost = "192.168.1.42"
+    var controlPort: UInt16 = 9001
 
-    // MARK: - Start
+    private var connection: NWConnection?
+    private var queue = DispatchQueue(label: "proxy.control", qos: .userInitiated)
 
+    // MARK: - Start (через Linux control server)
     func start(peer: String, vkLink: String, threads: Int, useUDP: Bool, noDtls: Bool, localPort: String) {
-        guard !peer.isEmpty, !vkLink.isEmpty else {
-            addLog("ОШИБКА: Укажите Peer и ссылку VK Calls")
-            return
-        }
-
-        // Ищем бинарник в bundle приложения
-        guard let binaryPath = Bundle.main.path(forResource: "vkturn-client", ofType: nil) else {
-            addLog("ОШИБКА: Бинарник vkturn-client не найден в bundle")
-            addLog("Поместите client-ios-arm64 в Resources/ и переименуйте в vkturn-client")
-            return
-        }
-
-        // Даём права на выполнение
-        let attrs: [FileAttributeKey: Any] = [.posixPermissions: NSNumber(value: 0o755)]
-        try? FileManager.default.setAttributes(attrs, ofItemAtPath: binaryPath)
-
-        // Формируем аргументы
-        var args: [String] = [
-            "-peer", peer,
-            "-vk-link", vkLink,
-            "-listen", localPort.isEmpty ? "127.0.0.1:9000" : localPort,
-            "-n", "\(max(1, min(16, threads)))"
-        ]
-        if useUDP  { args.append("-udp") }
-        if noDtls  { args.append("-no-dtls") }
-
-        addLog("=== ЗАПУСК ПРОКСИ ===")
-        addLog("Команда: vkturn-client \(args.joined(separator: " "))")
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: binaryPath)
-        proc.arguments = args
-
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError  = pipe
-        outputPipe = pipe
-
-        // Читаем вывод в реальном времени
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty,
-                  let text = String(data: data, encoding: .utf8) else { return }
-            let lines = text.components(separatedBy: "\n").filter { !$0.isEmpty }
-            for line in lines { self?.addLog(line) }
-        }
-
-        proc.terminationHandler = { [weak self] _ in
-            DispatchQueue.main.async {
-                self?.isRunning = false
-                self?.addLog("=== ПРОЦЕСС ОСТАНОВЛЕН (Код: \(proc.terminationStatus)) ===")
-            }
-        }
-
-        do {
-            try proc.run()
-            process = proc
-            DispatchQueue.main.async { self.isRunning = true }
-        } catch {
-            addLog("КРИТИЧЕСКАЯ ОШИБКА: \(error.localizedDescription)")
-        }
+        let cmd = buildCommand(peer: peer, vkLink: vkLink, threads: threads,
+                               useUDP: useUDP, noDtls: noDtls, localPort: localPort)
+        addLog("→ Отправка команды на Linux: \(controlHost):\(controlPort)")
+        sendControlCommand("START:\(cmd)")
     }
-
-    // MARK: - Stop
 
     func stop() {
-        process?.terminate()
-        outputPipe?.fileHandleForReading.readabilityHandler = nil
-        process = nil
-        outputPipe = nil
-        DispatchQueue.main.async {
-            self.isRunning = false
-            self.addLog("=== ОСТАНОВКА ИЗ ИНТЕРФЕЙСА ===")
+        sendControlCommand("STOP")
+        DispatchQueue.main.async { self.isRunning = false }
+        addLog("→ Команда STOP отправлена")
+    }
+
+    // MARK: - Direct mode (прямое подключение к VPS без TURN)
+    func startDirect() {
+        addLog("""
+        ╔══════════════════════════════════════════╗
+        ║  ПРЯМОЕ ПОДКЛЮЧЕНИЕ (без TURN)           ║
+        ╠══════════════════════════════════════════╣
+        ║  Настрой WireGuard на iPhone:            ║
+        ║  Endpoint: 192.145.28.186:51820          ║
+        ║  PrivateKey: iJAjkFaOTe0K9FAtdA...      ║
+        ║  PublicKey:  ZuBkD79x3bXkJWP0y8...      ║
+        ║  Address:    10.66.66.2/24               ║
+        ║  DNS:        8.8.8.8                     ║
+        ╚══════════════════════════════════════════╝
+        """)
+    }
+
+    // MARK: - Linux relay mode info
+    func showLinuxRelayInfo(linuxIP: String) {
+        addLog("""
+        ╔══════════════════════════════════════════╗
+        ║  РЕЖИМ ЧЕРЕЗ LINUX РЕТРАНСЛЯТОР          ║
+        ╠══════════════════════════════════════════╣
+        ║  1. На Linux запусти:                    ║
+        ║     ./client-linux-amd64 \\              ║
+        ║       -peer 192.145.28.186:56000 \\      ║
+        ║       -vk-link "https://vk.com/..." \\  ║
+        ║       -listen 0.0.0.0:9000 -udp         ║
+        ║                                          ║
+        ║  2. WireGuard на iPhone:                 ║
+        ║     Endpoint: \(linuxIP.padding(toLength: 14, withPad: " ", startingAt: 0)):9000        ║
+        ║     PrivateKey: iJAjkFaOTe0K9F...       ║
+        ║     PublicKey:  ZuBkD79x3bXkJW...       ║
+        ║     Address:    10.66.66.2/24            ║
+        ╚══════════════════════════════════════════╝
+        """)
+    }
+
+    // MARK: - Control connection
+
+    private func sendControlCommand(_ command: String) {
+        let endpoint = NWEndpoint.hostPort(
+            host: NWEndpoint.Host(controlHost),
+            port: NWEndpoint.Port(rawValue: controlPort)!
+        )
+        let conn = NWConnection(to: endpoint, using: .tcp)
+        connection = conn
+
+        conn.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready:
+                let data = (command + "\n").data(using: .utf8)!
+                conn.send(content: data, completion: .contentProcessed({ _ in }))
+                self?.receiveLoop(conn)
+                DispatchQueue.main.async { self?.isRunning = command.hasPrefix("START") }
+            case .failed(let err):
+                self?.addLog("❌ Ошибка подключения к Linux: \(err)")
+                self?.addLog("   Проверь что control-server.py запущен на \(self?.controlHost ?? "?")")
+            default: break
+            }
+        }
+        conn.start(queue: queue)
+    }
+
+    private func receiveLoop(_ conn: NWConnection) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, isComplete, error in
+            if let data = data, let text = String(data: data, encoding: .utf8) {
+                let lines = text.components(separatedBy: "\n").filter { !$0.isEmpty }
+                lines.forEach { self?.addLog($0) }
+            }
+            if !isComplete && error == nil {
+                self?.receiveLoop(conn)
+            }
         }
     }
 
-    // MARK: - Log
+    // MARK: - Helpers
+
+    private func buildCommand(peer: String, vkLink: String, threads: Int, useUDP: Bool, noDtls: Bool, localPort: String) -> String {
+        var args = "-peer \(peer) -vk-link \"\(vkLink)\" -listen \(localPort) -n \(threads)"
+        if useUDP  { args += " -udp" }
+        if noDtls  { args += " -no-dtls" }
+        return args
+    }
 
     func addLog(_ msg: String) {
         DispatchQueue.main.async {
             if self.logs.count > 300 { self.logs.removeFirst(100) }
-            self.logs.append(msg)
+            let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+            self.logs.append("[\(timestamp)] \(msg)")
         }
     }
 
-    func clearLogs() {
-        logs = ["Консоль очищена."]
-    }
+    func clearLogs() { logs = ["Консоль очищена."] }
 }

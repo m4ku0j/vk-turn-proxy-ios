@@ -1,0 +1,51 @@
+name: VKTurnProxy
+options:
+  bundleIdPrefix: com.vkturn
+  deploymentTarget:
+    iOS: "15.0"
+  xcodeVersion: "16.2"
+  swift: "5.7"
+
+packages:
+  NMSSH:
+    url: https://github.com/NMSSH/NMSSH.git
+    from: "2.3.1"
+
+targets:
+  VKTurnProxy:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: VKTurnProxy
+        excludes:
+          - "**/.DS_Store"
+    resources:
+      - path: VKTurnProxy/Resources
+        optional: true
+    info:
+      path: VKTurnProxy/Info.plist
+      properties:
+        CFBundleDisplayName: VK Turn Proxy
+        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.0"
+        UILaunchStoryboardName: ""
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UIBackgroundModes:
+          - audio
+        NSLocalNetworkUsageDescription: "Needed to connect to local vk-turn-proxy relay"
+        NSBonjourServices:
+          - "_wireguard._udp"
+    dependencies:
+      - package: NMSSH
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vkturn.proxy
+        SWIFT_VERSION: "5.7"
+        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        ENABLE_BITCODE: NO
+        DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
