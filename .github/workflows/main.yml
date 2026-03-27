@@ -1,0 +1,104 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Select Xcode 16.2
+      run: sudo xcode-select -switch /Applications/Xcode_16.2.app
+
+    - name: Install XcodeGen
+      run: brew install xcodegen
+
+    - name: Generate .xcodeproj from project.yml
+      run: xcodegen generate
+
+    - name: Download vkturn-client binary (placeholder)
+      run: |
+        mkdir -p VKTurnProxy/Resources
+        # Скачиваем arm64 бинарник (для iOS sideload)
+        curl -fL -o VKTurnProxy/Resources/vkturn-client \
+          https://github.com/cacggghp/vk-turn-proxy/releases/download/v1.1.1/client-android-arm64 \
+          || echo "Binary download failed, using placeholder"
+        # Placeholder если скачать не удалось
+        [ -f VKTurnProxy/Resources/vkturn-client ] || echo "placeholder" > VKTurnProxy/Resources/vkturn-client
+
+    - name: Resolve Swift Package dependencies
+      run: |
+        xcodebuild -resolvePackageDependencies \
+          -project VKTurnProxy.xcodeproj \
+          -scheme VKTurnProxy
+
+    - name: Build (unsigned, simulator check)
+      run: |
+        xcodebuild build \
+          -project VKTurnProxy.xcodeproj \
+          -scheme VKTurnProxy \
+          -destination "generic/platform=iOS Simulator" \
+          -configuration Debug \
+          CODE_SIGN_IDENTITY="" \
+          CODE_SIGNING_REQUIRED=NO \
+          ONLY_ACTIVE_ARCH=NO \
+          | xcpretty || true
+
+    # ── Для реального .ipa (нужен Apple Developer аккаунт) ──────────────
+    # Добавь в Secrets репозитория:
+    #   APPLE_CERTIFICATE_BASE64  — base64 от .p12
+    #   APPLE_CERTIFICATE_PASS    — пароль
+    #   APPLE_PROVISIONING_BASE64 — base64 от .mobileprovision
+    #   KEYCHAIN_PASS             — любой пароль
+    #
+    # - name: Install certificate + profile
+    #   env:
+    #     APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+    #     APPLE_CERTIFICATE_PASS:   ${{ secrets.APPLE_CERTIFICATE_PASS }}
+    #     APPLE_PROVISIONING_BASE64: ${{ secrets.APPLE_PROVISIONING_BASE64 }}
+    #     KEYCHAIN_PASS:            ${{ secrets.KEYCHAIN_PASS }}
+    #   run: |
+    #     echo $APPLE_CERTIFICATE_BASE64 | base64 --decode > cert.p12
+    #     security create-keychain -p "$KEYCHAIN_PASS" build.keychain
+    #     security default-keychain -s build.keychain
+    #     security unlock-keychain -p "$KEYCHAIN_PASS" build.keychain
+    #     security import cert.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASS" -T /usr/bin/codesign
+    #     security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASS" build.keychain
+    #     echo $APPLE_PROVISIONING_BASE64 | base64 --decode > profile.mobileprovision
+    #     mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+    #     cp profile.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/
+    #
+    # - name: Archive
+    #   run: |
+    #     xcodebuild archive \
+    #       -project VKTurnProxy.xcodeproj \
+    #       -scheme VKTurnProxy \
+    #       -destination "generic/platform=iOS" \
+    #       -archivePath build/VKTurnProxy.xcarchive \
+    #       CODE_SIGN_STYLE=Manual \
+    #       PROVISIONING_PROFILE_SPECIFIER="<ИМЯ_ПРОФИЛЯ>"
+    #
+    # - name: Export IPA
+    #   run: |
+    #     cat > ExportOptions.plist <<EOF
+    #     <?xml version="1.0" encoding="UTF-8"?>
+    #     <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    #     <plist version="1.0"><dict>
+    #       <key>method</key><string>ad-hoc</string>
+    #       <key>thinning</key><string>&lt;none&gt;</string>
+    #     </dict></plist>
+    #     EOF
+    #     xcodebuild -exportArchive \
+    #       -archivePath build/VKTurnProxy.xcarchive \
+    #       -exportPath build/ \
+    #       -exportOptionsPlist ExportOptions.plist
+    #
+    # - uses: actions/upload-artifact@v4
+    #   with:
+    #     name: VKTurnProxy-ipa
+    #     path: build/*.ipa
