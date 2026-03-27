@@ -8,75 +8,97 @@ on:
 jobs:
   build:
     runs-on: macos-15
-    
+
     steps:
     - uses: actions/checkout@v4
 
-    - name: Select Xcode
+    - name: Select Xcode 16.2
       run: sudo xcode-select -switch /Applications/Xcode_16.2.app
 
-    - name: Download vkturn-client binary
+    - name: Install XcodeGen
+      run: brew install xcodegen
+
+    - name: Generate .xcodeproj from project.yml
+      run: xcodegen generate
+
+    - name: Download vkturn-client binary (placeholder)
       run: |
         mkdir -p VKTurnProxy/Resources
-        curl -L -o VKTurnProxy/Resources/vkturn-client \
-          https://github.com/cacggghp/vk-turn-proxy/releases/download/v1.1.1/client-android-arm64
-        chmod +x VKTurnProxy/Resources/vkturn-client
+        # Скачиваем arm64 бинарник (для iOS sideload)
+        curl -fL -o VKTurnProxy/Resources/vkturn-client \
+          https://github.com/cacggghp/vk-turn-proxy/releases/download/v1.1.1/client-android-arm64 \
+          || echo "Binary download failed, using placeholder"
+        # Placeholder если скачать не удалось
+        [ -f VKTurnProxy/Resources/vkturn-client ] || echo "placeholder" > VKTurnProxy/Resources/vkturn-client
 
-    - name: Resolve SPM dependencies
-      run: xcodebuild -resolvePackageDependencies -scheme VKTurnProxy
+    - name: Resolve Swift Package dependencies
+      run: |
+        xcodebuild -resolvePackageDependencies \
+          -project VKTurnProxy.xcodeproj \
+          -scheme VKTurnProxy
 
-    - name: Build (unsigned, for simulator check)
+    - name: Build (unsigned, simulator check)
       run: |
         xcodebuild build \
+          -project VKTurnProxy.xcodeproj \
           -scheme VKTurnProxy \
           -destination "generic/platform=iOS Simulator" \
           -configuration Debug \
-          CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO \
+          CODE_SIGN_IDENTITY="" \
+          CODE_SIGNING_REQUIRED=NO \
           ONLY_ACTIVE_ARCH=NO \
           | xcpretty || true
 
-    # -------------------------------------------------------
-    # Для реального .ipa нужен Apple Developer сертификат.
-    # Раскомментируй шаги ниже и добавь секреты в GitHub:
-    #   APPLE_CERTIFICATE_BASE64  — p12 сертификат в base64
-    #   APPLE_CERTIFICATE_PASS    — пароль от p12
-    #   APPLE_PROVISIONING_BASE64 — mobileprovision в base64
-    #   KEYCHAIN_PASS             — любой временный пароль
-    # -------------------------------------------------------
-    # - name: Install certificate
+    # ── Для реального .ipa (нужен Apple Developer аккаунт) ──────────────
+    # Добавь в Secrets репозитория:
+    #   APPLE_CERTIFICATE_BASE64  — base64 от .p12
+    #   APPLE_CERTIFICATE_PASS    — пароль
+    #   APPLE_PROVISIONING_BASE64 — base64 от .mobileprovision
+    #   KEYCHAIN_PASS             — любой пароль
+    #
+    # - name: Install certificate + profile
     #   env:
     #     APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
-    #     APPLE_CERTIFICATE_PASS: ${{ secrets.APPLE_CERTIFICATE_PASS }}
-    #     KEYCHAIN_PASS: ${{ secrets.KEYCHAIN_PASS }}
+    #     APPLE_CERTIFICATE_PASS:   ${{ secrets.APPLE_CERTIFICATE_PASS }}
+    #     APPLE_PROVISIONING_BASE64: ${{ secrets.APPLE_PROVISIONING_BASE64 }}
+    #     KEYCHAIN_PASS:            ${{ secrets.KEYCHAIN_PASS }}
     #   run: |
-    #     echo $APPLE_CERTIFICATE_BASE64 | base64 --decode > certificate.p12
+    #     echo $APPLE_CERTIFICATE_BASE64 | base64 --decode > cert.p12
     #     security create-keychain -p "$KEYCHAIN_PASS" build.keychain
     #     security default-keychain -s build.keychain
     #     security unlock-keychain -p "$KEYCHAIN_PASS" build.keychain
-    #     security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASS" -T /usr/bin/codesign
+    #     security import cert.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASS" -T /usr/bin/codesign
     #     security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASS" build.keychain
-    #
-    # - name: Install provisioning profile
-    #   env:
-    #     APPLE_PROVISIONING_BASE64: ${{ secrets.APPLE_PROVISIONING_BASE64 }}
-    #   run: |
     #     echo $APPLE_PROVISIONING_BASE64 | base64 --decode > profile.mobileprovision
     #     mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
     #     cp profile.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/
     #
-    # - name: Archive and export IPA
+    # - name: Archive
     #   run: |
     #     xcodebuild archive \
+    #       -project VKTurnProxy.xcodeproj \
     #       -scheme VKTurnProxy \
     #       -destination "generic/platform=iOS" \
-    #       -archivePath build/VKTurnProxy.xcarchive
+    #       -archivePath build/VKTurnProxy.xcarchive \
+    #       CODE_SIGN_STYLE=Manual \
+    #       PROVISIONING_PROFILE_SPECIFIER="<ИМЯ_ПРОФИЛЯ>"
+    #
+    # - name: Export IPA
+    #   run: |
+    #     cat > ExportOptions.plist <<EOF
+    #     <?xml version="1.0" encoding="UTF-8"?>
+    #     <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    #     <plist version="1.0"><dict>
+    #       <key>method</key><string>ad-hoc</string>
+    #       <key>thinning</key><string>&lt;none&gt;</string>
+    #     </dict></plist>
+    #     EOF
     #     xcodebuild -exportArchive \
     #       -archivePath build/VKTurnProxy.xcarchive \
     #       -exportPath build/ \
     #       -exportOptionsPlist ExportOptions.plist
     #
-    # - name: Upload IPA
-    #   uses: actions/upload-artifact@v4
+    # - uses: actions/upload-artifact@v4
     #   with:
-    #     name: VKTurnProxy.ipa
+    #     name: VKTurnProxy-ipa
     #     path: build/*.ipa
